@@ -1,0 +1,62 @@
+import boto3
+import json
+import uuid
+
+scheduler = boto3.client('scheduler')
+sqs = boto3.client('sqs')
+
+flex_window = { "Mode": "OFF" }
+
+retry_policy = {
+        'MaximumRetryAttempts': 0
+    }
+target_template = {
+        "RoleArn": "arn:aws:iam::123456789012:role/eventbridge-role", # your event bridge scheduler role arn
+        "Arn": "arn:aws:lambda:eu-west-1:123456789012:function:email-sender-lambda", # your email sender lambda arn
+        "RetryPolicy":retry_policy
+    }
+
+dlq_url = 'https://sqs.eu-west-1.amazonaws.com/123456789012/request-dlq' # your dlq url
+
+
+def lambda_handler(event, context):
+
+    request_body = json.loads(event['Records'][0]['body'])
+    print('Request Body', request_body)
+    
+    try:
+        
+        target_template['Input'] = json.dumps(request_body['email'])
+        schedule_expression = "at(" + request_body['timeToSend']+")"
+        
+        response = scheduler.create_schedule(
+            ActionAfterCompletion='DELETE',
+            Name=str(uuid.uuid4()),
+            ScheduleExpression=schedule_expression,
+            Target=target_template,
+            State='ENABLED',
+            FlexibleTimeWindow=flex_window)
+            
+        print('response', response)
+            
+    except scheduler.exceptions.ServiceQuotaExceededException:
+        print('Service Quota Exceeded, sending message to queue')
+        
+        response = sqs.send_message(
+            QueueUrl=dlq_url,
+            MessageBody=request_body
+        )
+        
+    except Exception as e:
+        error_message = str(e)
+        print("An error occurred:", error_message)
+        
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": error_message})
+        }
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps({"message": "Payload received successfully"})
+    }
